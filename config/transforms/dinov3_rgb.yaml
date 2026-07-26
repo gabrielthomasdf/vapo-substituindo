@@ -1,0 +1,29 @@
+training:
+  - _target_: torchvision.transforms.Resize
+    size: ${img_resize}
+
+  - _target_: vapo.affordance.dataloader.transforms.ColorTransform
+    contrast: 0.05
+    brightness: 0.05
+    hue: 0.02
+    prob: 1
+
+  - _target_: vapo.affordance.dataloader.transforms.ScaleImageTensor
+
+  - _target_: vapo.affordance.dataloader.transforms.AddGaussianNoise
+    mean: [0.0]
+    std: [0.01]
+    clip: [0, 1]
+
+validation:
+  - _target_: torchvision.transforms.Resize
+    size: ${img_resize}
+
+  - _target_: vapo.affordance.dataloader.transforms.ScaleImageTensor
+
+masks:
+  - _target_: torchvision.transforms.Resize
+    size: ${img_resize}
+
+  - _target_: vapo.affordance.dataloader.transforms.ThresholdMasks
+    threshold: 50

@@ -19,7 +19,7 @@ optimizer:
   lr: 1e-5
   weight_decay: 1e-3
 unet_cfg:
-  decoder_channels: [128, 64, 32]
+  decoder_channels: [256, 128, 64, 32]
 hough_voting:
   skip_pixels: 2
   inlier_threshold: 0.7
@@ -27,3 +27,9 @@ hough_voting:
   inlier_distance: 10
   percentage_threshold: 0.3
   object_center_kernel_radius: 10
+dinov3_cfg:
+  model_name: dinov3_vits16plus
+  repo_dir: "C:/caminho/para/dinov3"
+  weights_path: "C:/caminho/para/checkpoint.pth"
+  freeze_backbone: true
+  normalize_input: true

@@ -32,7 +32,7 @@ class AddGaussianNoise(object):
 
         t = tensor + torch.randn(tensor.size(), device=device) * _std + _mean
         if self.clip:
-            t.clamp(self.clip[0], self.clip[1])
+            t = t.clamp(self.clip[0], self.clip[1])
         return t
 
     def __repr__(self):
@@ -76,7 +76,6 @@ class ColorTransform(object):
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         assert isinstance(tensor, torch.Tensor)
         apply = np.random.rand() < self.prob
-        tensor = self.jitter(tensor)
         if apply:
             tensor = self.jitter(tensor)
         return tensor

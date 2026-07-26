@@ -85,8 +85,8 @@ class VREnvData(Dataset):
         data = np.load(self.root_dir + "/%s/data/%s/%s.npz" % (episode, cam_folder, filename))
 
         # Images are stored in BGR
-        frame = data["frame"]
-        frame = torch.from_numpy(frame).permute(2, 0, 1)  # C, W, H
+        frame = cv2.cvtColor(data["frame"], cv2.COLOR_BGR2RGB)
+        frame = torch.from_numpy(frame).permute(2, 0, 1)
         frame = self.transforms(frame)
 
         # Segmentation mask (H, W)

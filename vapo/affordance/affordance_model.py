@@ -3,6 +3,8 @@ import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
+from vapo.affordance.Dinov3Adapter import DINOv3PyramidEncoder
+import inspect
 
 from vapo.affordance.hough_voting import hough_voting as hv
 from vapo.affordance.utils.losses import (
@@ -23,6 +25,7 @@ class AffordanceModel(pl.LightningModule):
             decoder_channels=cfg.unet_cfg.decoder_channels,
             in_channels=input_channels,
             n_classes=self.n_classes,
+            dinov3_cfg=cfg.dinov3_cfg,
         )
         self.optimizer_cfg = cfg.optimizer
         # Loss function
@@ -47,26 +50,51 @@ class AffordanceModel(pl.LightningModule):
             self.act_fnc = torch.nn.Sigmoid()
         self.save_hyperparameters()
 
-    def init_model(self, decoder_channels=None, n_classes=2, in_channels=1):
+    def init_model(self, decoder_channels=None, n_classes=2, in_channels=1, dinov3_cfg=None):
         if decoder_channels is None:
-            decoder_channels = [128, 64, 32]
+            decoder_channels = [256, 128, 64, 32]
+
+        depth = len(decoder_channels)
         # encoder_depth Should be equal to number of layers in decoder
         unet = smp.Unet(
             encoder_name="resnet18",
-            encoder_weights="imagenet",
+            encoder_weights=None,
             in_channels=in_channels,  # Grayscale
             classes=n_classes,
-            encoder_depth=len(decoder_channels),
+            encoder_depth=depth,
             decoder_channels=tuple(decoder_channels),
             activation=None,
         )
-        # Fix encoder weights. Only train decoder
-        for param in unet.encoder.parameters():
-            param.requires_grad = False
+
+        encoder_out_channels = tuple(unet.encoder.out_channels)
+        # Removido por que não pode congelar a projeção e no backbone já está congelado
+        #for param in unet.encoder.parameters():
+        #    param.requires_grad = False
+        
+        backbone = torch.hub.load(
+            dinov3_cfg.repo_dir,
+            dinov3_cfg.model_name,
+            source="local",
+            weights=dinov3_cfg.weights_path,
+        )
+
+        unet.encoder = DINOv3PyramidEncoder(
+            backbone=backbone,
+            out_channels=encoder_out_channels,
+            depth=depth,
+            in_channels=in_channels,
+            freeze_backbone=dinov3_cfg.freeze_backbone,
+            normalize_input=dinov3_cfg.normalize_input,
+        )
+
+        for name, parameter in unet.encoder.named_parameters():
+                    print(name, parameter.requires_grad)
 
         # A 1x1 conv layer that goes from embedded features to 2d pixel direction
         feature_dim = decoder_channels[-1]
         center_direction_net = nn.Conv2d(feature_dim, 2, kernel_size=1, stride=1, padding=0, bias=False)
+        print(smp.__version__)
+        print(inspect.signature(unet.decoder.forward))
 
         return unet, center_direction_net
 

@@ -1,7 +1,7 @@
 defaults:
   - paths: general_paths
   - aff_model@model_cfg: default
-  - transforms@dataset.transforms_cfg: rgb
+  - transforms@dataset.transforms_cfg: dinov3_rgb
   - override hydra/hydra_logging: colorlog
   - override hydra/job_logging: colorlog
 
@@ -17,16 +17,16 @@ dataset:
   data_dir: ${paths.datasets}/${dataset_name}
   cam: gripper  # gripper or static
   img_resize:
-    static: 200
-    gripper: 64
-    all: 100  # Resize to this if using all images
+    static: 192
+    gripper: 128
+    all: 96  # Resize to this if using all images
   radius:
     static: 14
-    gripper: 10
+    gripper: 20
 
 dataloader:
   num_workers: 4
-  batch_size: 128
+  batch_size: 2
   pin_memory: true
 
 trainer:
