@@ -1,3 +1,4 @@
+encoder_type: dinov3
 loss:
   centers: 2.5
   dice: 5
@@ -29,7 +30,7 @@ hough_voting:
   object_center_kernel_radius: 10
 dinov3_cfg:
   model_name: dinov3_vits16plus
-  repo_dir: "C:/caminho/para/dinov3"
-  weights_path: "C:/caminho/para/checkpoint.pth"
+  repo_dir: ${oc.env:DINOV3_REPO_DIR}
+  weights_path: ${oc.env:DINOV3_WEIGHTS_PATH}
   freeze_backbone: true
   normalize_input: true

@@ -1,5 +1,6 @@
 n_classes: 4
 cfg:
+  encoder_type: resnet18
   loss:
     centers: 5
     dice: 10

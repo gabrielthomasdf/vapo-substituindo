@@ -1,11 +1,12 @@
+import os
+
 import numpy as np
 import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
-from vapo.affordance.Dinov3Adapter import DINOv3PyramidEncoder
-import inspect
 
+from vapo.affordance.Dinov3Adapter import DINOv3PyramidEncoder
 from vapo.affordance.hough_voting import hough_voting as hv
 from vapo.affordance.utils.losses import (
     compute_dice_loss,
@@ -17,15 +18,22 @@ from vapo.affordance.utils.losses import (
 
 
 class AffordanceModel(pl.LightningModule):
+    SUPPORTED_ENCODERS = ("resnet18", "dinov3")
+
     def __init__(self, cfg, input_channels=1, n_classes=2, cmd_log=None, *args, **kwargs):
         super().__init__()
         self.n_classes = n_classes
+        self.encoder_type = self._resolve_encoder_type(cfg)
+        dinov3_cfg = None
+        if self.encoder_type == "dinov3":
+            dinov3_cfg = self._get_cfg_value(cfg, "dinov3_cfg")
         # https://github.com/qubvel/segmentation_models.pytorch
         self.unet, self.center_direction_net = self.init_model(
             decoder_channels=cfg.unet_cfg.decoder_channels,
             in_channels=input_channels,
             n_classes=self.n_classes,
-            dinov3_cfg=cfg.dinov3_cfg,
+            encoder_type=self.encoder_type,
+            dinov3_cfg=dinov3_cfg,
         )
         self.optimizer_cfg = cfg.optimizer
         # Loss function
@@ -50,51 +58,108 @@ class AffordanceModel(pl.LightningModule):
             self.act_fnc = torch.nn.Sigmoid()
         self.save_hyperparameters()
 
-    def init_model(self, decoder_channels=None, n_classes=2, in_channels=1, dinov3_cfg=None):
+    @staticmethod
+    def _get_cfg_value(cfg, key, default=None):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        if hasattr(cfg, "get"):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
+
+    @classmethod
+    def _resolve_encoder_type(cls, cfg):
+        encoder_type = cls._get_cfg_value(cfg, "encoder_type")
+        if encoder_type is None:
+            # Checkpoints/configs created by the first DINOv3 integration have
+            # dinov3_cfg but no encoder_type. Official VAPO checkpoints have
+            # neither field and therefore keep using the original encoder.
+            encoder_type = "dinov3" if cls._get_cfg_value(cfg, "dinov3_cfg") is not None else "resnet18"
+        encoder_type = str(encoder_type).lower()
+        if encoder_type not in cls.SUPPORTED_ENCODERS:
+            supported = ", ".join(cls.SUPPORTED_ENCODERS)
+            raise ValueError(f"Unknown affordance encoder_type '{encoder_type}'. Expected one of: {supported}.")
+        return encoder_type
+
+    @classmethod
+    def _validate_dinov3_cfg(cls, dinov3_cfg):
+        if dinov3_cfg is None:
+            raise ValueError("encoder_type='dinov3' requires a dinov3_cfg section.")
+
+        required_fields = ("repo_dir", "model_name", "weights_path", "freeze_backbone", "normalize_input")
+        missing_fields = [
+            field for field in required_fields if cls._get_cfg_value(dinov3_cfg, field) in (None, "")
+        ]
+        if missing_fields:
+            raise ValueError(
+                "encoder_type='dinov3' requires these dinov3_cfg fields: " + ", ".join(missing_fields) + "."
+            )
+
+        repo_dir = os.path.expandvars(os.path.expanduser(str(cls._get_cfg_value(dinov3_cfg, "repo_dir"))))
+        weights_path = os.path.expandvars(os.path.expanduser(str(cls._get_cfg_value(dinov3_cfg, "weights_path"))))
+        if not os.path.isdir(repo_dir):
+            raise ValueError(f"DINOv3 repository directory does not exist: {repo_dir}")
+        if not os.path.isfile(weights_path):
+            raise ValueError(f"DINOv3 weights file does not exist: {weights_path}")
+        return repo_dir, weights_path
+
+    def init_model(
+        self,
+        decoder_channels=None,
+        n_classes=2,
+        in_channels=1,
+        encoder_type="resnet18",
+        dinov3_cfg=None,
+    ):
         if decoder_channels is None:
-            decoder_channels = [256, 128, 64, 32]
+            decoder_channels = [128, 64, 32] if encoder_type == "resnet18" else [256, 128, 64, 32]
+
+        if encoder_type == "resnet18" and in_channels != 1:
+            raise ValueError(f"encoder_type='resnet18' expects one grayscale input channel, got {in_channels}.")
+        if encoder_type == "dinov3" and in_channels != 3:
+            raise ValueError(f"encoder_type='dinov3' expects three RGB input channels, got {in_channels}.")
 
         depth = len(decoder_channels)
         # encoder_depth Should be equal to number of layers in decoder
         unet = smp.Unet(
             encoder_name="resnet18",
+            # Checkpoint loading replaces every parameter. Avoid an implicit
+            # ImageNet download while preserving the original module layout.
             encoder_weights=None,
-            in_channels=in_channels,  # Grayscale
+            in_channels=in_channels,
             classes=n_classes,
             encoder_depth=depth,
             decoder_channels=tuple(decoder_channels),
             activation=None,
         )
 
-        encoder_out_channels = tuple(unet.encoder.out_channels)
-        # Removido por que não pode congelar a projeção e no backbone já está congelado
-        #for param in unet.encoder.parameters():
-        #    param.requires_grad = False
-        
-        backbone = torch.hub.load(
-            dinov3_cfg.repo_dir,
-            dinov3_cfg.model_name,
-            source="local",
-            weights=dinov3_cfg.weights_path,
-        )
+        if encoder_type == "resnet18":
+            # Original VAPO model: keep the encoder fixed and train the decoder.
+            for param in unet.encoder.parameters():
+                param.requires_grad = False
+        elif encoder_type == "dinov3":
+            repo_dir, weights_path = self._validate_dinov3_cfg(dinov3_cfg)
+            encoder_out_channels = tuple(unet.encoder.out_channels)
+            backbone = torch.hub.load(
+                repo_dir,
+                self._get_cfg_value(dinov3_cfg, "model_name"),
+                source="local",
+                weights=weights_path,
+            )
 
-        unet.encoder = DINOv3PyramidEncoder(
-            backbone=backbone,
-            out_channels=encoder_out_channels,
-            depth=depth,
-            in_channels=in_channels,
-            freeze_backbone=dinov3_cfg.freeze_backbone,
-            normalize_input=dinov3_cfg.normalize_input,
-        )
-
-        for name, parameter in unet.encoder.named_parameters():
-                    print(name, parameter.requires_grad)
+            unet.encoder = DINOv3PyramidEncoder(
+                backbone=backbone,
+                out_channels=encoder_out_channels,
+                depth=depth,
+                in_channels=in_channels,
+                freeze_backbone=self._get_cfg_value(dinov3_cfg, "freeze_backbone"),
+                normalize_input=self._get_cfg_value(dinov3_cfg, "normalize_input"),
+            )
 
         # A 1x1 conv layer that goes from embedded features to 2d pixel direction
         feature_dim = decoder_channels[-1]
         center_direction_net = nn.Conv2d(feature_dim, 2, kernel_size=1, stride=1, padding=0, bias=False)
-        print(smp.__version__)
-        print(inspect.signature(unet.decoder.forward))
 
         return unet, center_direction_net
 
