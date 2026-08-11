@@ -124,3 +124,15 @@ dist/
 .mypy_cache/
 VREnv/egl_check/EGL_options.o
 datasets/playdata/*/
+
+# Local agent and teaching workspace
+/.agents/
+/.scratch/
+/AGENTS.md
+/docs/agents/
+/MISSION.md
+/RESOURCES.md
+/NOTES.md
+/lessons/
+/reference/
+/assets/course.css

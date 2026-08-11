@@ -6,6 +6,7 @@ import gym
 import numpy as np
 import torch
 
+from vapo.affordance.affordance_model import AffordanceModel
 from vapo.affordance.utils.img_utils import overlay_mask, torch_to_numpy, viz_aff_centers_preds
 from vapo.agent.core.utils import tt
 from vapo.utils.utils import init_aff_net
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 class AffordanceWrapperBase(gym.Wrapper):
+    DINOV3_GRIPPER_AFF_SIZE = 128
+
     def __init__(
         self,
         env,
@@ -46,7 +49,18 @@ class AffordanceWrapperBase(gym.Wrapper):
         if img_size in affordance_cfg.static_cam:
             _static_aff_im_size = affordance_cfg.static_cam.img_size
 
-        _gripper_aff_transforms, _aff_shape = get_transforms_and_shape(_transforms_cfg, self.img_size)
+        self.gripper_aff_img_size = self._get_gripper_aff_img_size(
+            affordance_cfg.gripper_cam, self.img_size
+        )
+        if self.gripper_aff_img_size == self.img_size:
+            # Preserve the official ResNet18 preprocessing path exactly.
+            _gripper_aff_transforms, _aff_shape = get_transforms_and_shape(
+                _transforms_cfg, self.img_size
+            )
+        else:
+            _gripper_aff_transforms, _aff_shape = get_transforms_and_shape(
+                _transforms_cfg, self.img_size, out_size=self.gripper_aff_img_size
+            )
 
         self.aff_transforms = {
             "static": get_transforms_and_shape(_transforms_cfg, self.img_size, out_size=_static_aff_im_size)[0],
@@ -90,6 +104,41 @@ class AffordanceWrapperBase(gym.Wrapper):
         self.env.observation_space = self.observation_space
         self._curr_detected_obj = None
         self._target = None
+
+    @staticmethod
+    def _cfg_value(cfg, key, default=None):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        if hasattr(cfg, "get"):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
+
+    @classmethod
+    def _get_gripper_aff_img_size(cls, gripper_aff_cfg, policy_img_size):
+        hyperparameters = cls._cfg_value(gripper_aff_cfg, "hyperparameters")
+        model_cfg = cls._cfg_value(hyperparameters, "cfg")
+        # Reuse the already validated encoder selection, including legacy
+        # checkpoint/config compatibility, without introducing a second rule.
+        uses_dinov3 = AffordanceModel._resolve_encoder_type(model_cfg) == "dinov3"
+        return cls.DINOV3_GRIPPER_AFF_SIZE if uses_dinov3 else policy_img_size
+
+    @staticmethod
+    def _resize_gripper_aff_for_policy(mask, output_size):
+        if mask.shape[-2:] == (output_size, output_size):
+            return mask
+        return np.stack(
+            [
+                cv2.resize(
+                    sample.astype(np.float32),
+                    (output_size, output_size),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(mask.dtype)
+                for sample in mask
+            ],
+            axis=0,
+        )
 
     @property
     def target(self):
@@ -221,6 +270,10 @@ class AffordanceWrapperBase(gym.Wrapper):
                 )
                 obs["target_distance"] = np.array([distance])
             if aff_cfg.use:
+                if cam_type == "gripper":
+                    # Center estimation consumes the native affordance outputs
+                    # above. Only the mask crossing the SAC boundary is resized.
+                    mask = self._resize_gripper_aff_for_policy(mask, self.img_size)
                 obs["%s_aff" % cam_type] = mask
         return obs, viz_dict
 
