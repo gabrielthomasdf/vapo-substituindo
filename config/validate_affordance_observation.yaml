@@ -1,0 +1,24 @@
+defaults:
+  - cfg_real_world
+  - override aff_model@affordance.gripper_cam.hyperparameters: gripper_cam_dinov3
+  - override transforms@affordance.transforms: dinov3_rgb
+  - _self_
+
+# This config is opt-in and does not replace the ResNet18 real-world config.
+affordance:
+  static_cam:
+    use: false
+  gripper_cam:
+    use: true
+    use_distance: true
+    densify_reward: true
+    target_in_obs: false
+
+save_images: false
+viz_obs: false
+env_wrapper:
+  viz: false
+
+hydra:
+  run:
+    dir: ./hydra_outputs/affordance_observation_validation/${now:%Y-%m-%d}/${now:%H-%M-%S}
