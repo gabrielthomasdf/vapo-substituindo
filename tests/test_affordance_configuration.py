@@ -62,6 +62,18 @@ def test_tabletop_dinov3_composition_keeps_camera_preprocessing_independent(monk
     assert cfg.affordance.static_cam.hyperparameters.cfg.encoder_type == "resnet18"
 
 
+def test_tabletop_dinov3_eval_opt_in_changes_only_gripper_affordance(monkeypatch):
+    baseline = _compose_tabletop("cfg_tabletop", monkeypatch)
+    dinov3 = _compose_tabletop("cfg_tabletop_dinov3", monkeypatch)
+
+    assert not baseline.test.preserve_current_affordance
+    assert dinov3.test.preserve_current_affordance
+    assert dinov3.affordance.gripper_cam.hyperparameters.cfg.encoder_type == "dinov3"
+    assert OmegaConf.to_container(
+        dinov3.affordance.static_cam, resolve=True
+    ) == OmegaConf.to_container(baseline.affordance.static_cam, resolve=True)
+
+
 def test_wrapper_rejects_dinov3_with_legacy_grayscale_preprocessing(monkeypatch):
     cfg = _compose_tabletop("cfg_tabletop", monkeypatch)
     cfg.affordance.gripper_cam.hyperparameters = OmegaConf.load(

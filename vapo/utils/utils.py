@@ -124,6 +124,20 @@ def load_cfg(cfg_path, cfg, optim_res=False, current_sections=()):
     return run_cfg, net_cfg, env_wrapper, agent_cfg
 
 
+def load_eval_cfg(cfg_path, cfg, optim_res=False):
+    """Load historical evaluation config with an explicit affordance opt-in."""
+    preserve_current_affordance = bool(
+        OmegaConf.select(cfg, "test.preserve_current_affordance", default=False)
+    )
+    current_sections = ("affordance",) if preserve_current_affordance else ()
+    return load_cfg(
+        cfg_path,
+        cfg,
+        optim_res=optim_res,
+        current_sections=current_sections,
+    )
+
+
 def get_3D_end_points(x, y, z, w, h, d):
     w = w / 2
     h = h / 2

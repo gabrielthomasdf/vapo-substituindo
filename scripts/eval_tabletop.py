@@ -3,9 +3,10 @@ import os
 import hydra
 
 from vapo.agent.vapo_agent import VAPOAgent
-from vapo.utils.utils import load_cfg
+from vapo.utils.utils import load_eval_cfg
 from vapo.wrappers.affordance.aff_wrapper_sim import AffordanceWrapperSim
 from vapo.wrappers.play_table_rl import PlayTableRL
+
 
 @hydra.main(config_path="../config", config_name="cfg_tabletop")
 def main(cfg):
@@ -13,10 +14,9 @@ def main(cfg):
     original_dir = hydra.utils.get_original_cwd()
     run_dir = os.path.join(original_dir, cfg.test.folder_name)
     run_dir = os.path.abspath(run_dir)
-    run_cfg, net_cfg, env_wrapper, agent_cfg = load_cfg(
+    run_cfg, net_cfg, env_wrapper, agent_cfg = load_eval_cfg(
         os.path.join(run_dir, ".hydra/config.yaml"),
         cfg,
-        current_sections=("affordance",),
     )
 
     run_cfg.paths = cfg.paths
