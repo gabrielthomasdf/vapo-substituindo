@@ -9,10 +9,12 @@ from vapo.wrappers.affordance.observation_diagnostics import (
     build_offline_runtime_comparison,
     build_report,
     collect_replayed_inference,
+    collect_same_tensor_inference,
     collect_single_observation,
 )
 from vapo.wrappers.affordance.simulation_diagnostics import (
     collect_positioned_observation,
+    positioned_observation_validation_passed,
 )
 
 
@@ -123,30 +125,147 @@ def test_replays_preprocessing_and_inference_from_the_exact_runtime_frame():
     original_prepare_input = wrapper.gripper_cam_aff_net.unet.encoder._prepare_input
 
     replayed = collect_replayed_inference(wrapper, captured["gripper_img_obs"])
-    comparison = build_offline_runtime_comparison(captured, replayed)
+    same_tensor = collect_same_tensor_inference(
+        wrapper, captured["affordance_model_input"]
+    )
+    comparison = build_offline_runtime_comparison(
+        captured, replayed, same_tensor
+    )
 
     assert comparison["checks"] == {
         "missing_values": {},
         "preprocessing_matches": True,
-        "inference_matches": True,
+        "same_tensor_inference_reproducible": True,
+        "semantic_replay_equivalent": True,
         "runtime_foreground_pixel_count": 128 * 128,
         "offline_replay_foreground_pixel_count": 128 * 128,
     }
+    assert comparison["preprocessing"]["equivalent"]
+    assert comparison["same_tensor_inference"]["reproducible"]
+    assert comparison["end_to_end_replay"]["semantically_equivalent"]
     assert wrapper.gripper_cam_aff_net.unet.encoder._prepare_input == original_prepare_input
 
 
-def test_offline_runtime_comparison_identifies_inference_divergence():
+def test_same_tensor_inference_bypasses_preprocessing_and_reports_reproducibility():
+    wrapper = FakeWrapper()
+    captured = collect_single_observation(wrapper, {})
+    wrapper.aff_transforms["gripper"] = lambda image: (_ for _ in ()).throw(
+        AssertionError("same-tensor inference must not run preprocessing")
+    )
+
+    same_tensor = collect_same_tensor_inference(
+        wrapper, captured["affordance_model_input"]
+    )
+
+    np.testing.assert_array_equal(
+        same_tensor["affordance_model_input"],
+        captured["affordance_model_input"],
+    )
+
+
+def test_end_to_end_replay_reports_one_pixel_semantic_divergence():
     wrapper = FakeWrapper()
     captured = collect_single_observation(wrapper, {})
     replayed = collect_replayed_inference(wrapper, captured["gripper_img_obs"])
-    replayed["affordance_logits"][0, 0, 0, 0] += 1
+    same_tensor = collect_same_tensor_inference(
+        wrapper, captured["affordance_model_input"]
+    )
+    replayed["affordance_model_input"][0, 0, 0, 0] += 5.96e-8
+    replayed["dinov3_model_input"][0, 0, 0, 0] += 3.58e-7
+    replayed["affordance_logits"][0, 0, 0, 0] += 0.0048248
+    replayed["affordance_probabilities"][0, 0, 0, 0] += 0.0020996
+    replayed["dinov3_mask_128"][0, 0, 0] = 0
 
-    comparison = build_offline_runtime_comparison(captured, replayed)
+    comparison = build_offline_runtime_comparison(
+        captured, replayed, same_tensor
+    )
 
     assert comparison["checks"]["preprocessing_matches"]
-    assert not comparison["checks"]["inference_matches"]
-    assert not comparison["values"]["affordance_logits"]["within_tolerance"]
-    assert comparison["values"]["affordance_logits"]["max_abs_diff"] == 1
+    assert comparison["checks"]["same_tensor_inference_reproducible"]
+    assert not comparison["checks"]["semantic_replay_equivalent"]
+    preprocessing = comparison["preprocessing"]["values"]
+    assert preprocessing["affordance_model_input"]["max_abs_diff"] == pytest.approx(
+        5.96e-8
+    )
+    assert preprocessing["dinov3_model_input"]["max_abs_diff"] == pytest.approx(
+        3.58e-7, abs=5e-10
+    )
+    logits = comparison["end_to_end_replay"]["values"]["affordance_logits"]
+    probabilities = comparison["end_to_end_replay"]["values"][
+        "affordance_probabilities"
+    ]
+    assert not logits["within_tolerance"]
+    assert logits["max_abs_diff"] == pytest.approx(0.0048248, abs=1e-7)
+    assert logits["mean_abs_diff"] == pytest.approx(
+        logits["max_abs_diff"] / 32768
+    )
+    assert probabilities["max_abs_diff"] == pytest.approx(0.0020996, abs=1e-7)
+    assert probabilities["mean_abs_diff"] == pytest.approx(
+        probabilities["max_abs_diff"] / 32768
+    )
+    metrics = comparison["end_to_end_replay"]["mask_metrics"]
+    assert metrics == {
+        "differing_pixel_count": 1,
+        "differing_fraction": pytest.approx(1 / 16384),
+        "iou": pytest.approx(16383 / 16384),
+        "dice": pytest.approx(32766 / 32767),
+        "runtime_foreground_pixel_count": 16384,
+        "offline_replay_foreground_pixel_count": 16383,
+    }
+
+
+def test_same_tensor_report_separates_bitwise_numeric_and_semantic_results():
+    wrapper = FakeWrapper()
+    captured = collect_single_observation(wrapper, {})
+    replayed = collect_replayed_inference(wrapper, captured["gripper_img_obs"])
+    same_tensor = collect_same_tensor_inference(
+        wrapper, captured["affordance_model_input"]
+    )
+    same_tensor["affordance_logits"][0, 0, 0, 0] += 1e-7
+
+    comparison = build_offline_runtime_comparison(
+        captured, replayed, same_tensor
+    )
+
+    same_tensor_report = comparison["same_tensor_inference"]
+    assert not comparison["checks"]["same_tensor_inference_reproducible"]
+    assert not same_tensor_report["reproducible"]
+    assert same_tensor_report["within_numerical_tolerance"]
+    assert same_tensor_report["semantically_reproducible"]
+    assert comparison["checks"]["semantic_replay_equivalent"]
+
+
+def test_functional_validation_does_not_conflate_semantic_replay_with_runtime_health():
+    report = {
+        "checks": {
+            "all_finite": True,
+            "shapes_match": True,
+            "center_found": True,
+            "world_conversion_succeeded": True,
+        },
+        "offline_runtime_comparison": {
+            "checks": {
+                "preprocessing_matches": True,
+                "same_tensor_inference_reproducible": False,
+                "semantic_replay_equivalent": False,
+            }
+        },
+    }
+
+    assert positioned_observation_validation_passed(report)
+
+    for check_name in (
+        "all_finite",
+        "shapes_match",
+        "center_found",
+        "world_conversion_succeeded",
+    ):
+        report["checks"][check_name] = False
+        assert not positioned_observation_validation_passed(report)
+        report["checks"][check_name] = True
+
+    report["offline_runtime_comparison"]["checks"]["preprocessing_matches"] = False
+    assert not positioned_observation_validation_passed(report)
 
 
 def test_report_checks_dinov3_shapes_and_non_finite_values():

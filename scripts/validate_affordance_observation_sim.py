@@ -10,9 +10,11 @@ from vapo.wrappers.affordance.aff_wrapper_sim import AffordanceWrapperSim
 from vapo.wrappers.affordance.observation_diagnostics import (
     build_offline_runtime_comparison,
     collect_replayed_inference,
+    collect_same_tensor_inference,
 )
 from vapo.wrappers.affordance.simulation_diagnostics import (
     collect_positioned_observation,
+    positioned_observation_validation_passed,
 )
 from vapo.wrappers.play_table_rl import PlayTableRL
 
@@ -53,11 +55,14 @@ def main(cfg):
             policy_img_size=int(cfg.env_wrapper.img_size),
             observation_attempts=int(cfg.observation_attempts),
         )
+        same_tensor = collect_same_tensor_inference(
+            wrapper, captured["affordance_model_input"]
+        )
         replayed = collect_replayed_inference(
             wrapper, captured["gripper_img_obs"]
         )
         report["offline_runtime_comparison"] = build_offline_runtime_comparison(
-            captured, replayed
+            captured, replayed, same_tensor
         )
 
         output_dir = Path(HydraConfig.get().runtime.output_dir)
@@ -73,25 +78,22 @@ def main(cfg):
                 if isinstance(value, np.ndarray)
             }
         )
+        arrays.update(
+            {
+                "same_tensor_%s" % name: value
+                for name, value in same_tensor.items()
+                if isinstance(value, np.ndarray)
+            }
+        )
         np.savez_compressed(str(arrays_path), **arrays)
 
         print(json.dumps(report, indent=2))
         print("Full values: %s" % arrays_path)
         print("Summary: %s" % report_path)
 
-        checks = report["checks"]
-        comparison_checks = report["offline_runtime_comparison"]["checks"]
-        passed = (
-            checks["all_finite"]
-            and checks["shapes_match"]
-            and checks["center_found"]
-            and checks["world_conversion_succeeded"]
-            and comparison_checks["preprocessing_matches"]
-            and comparison_checks["inference_matches"]
-        )
-        if not passed:
+        if not positioned_observation_validation_passed(report):
             raise RuntimeError(
-                "Positioned simulation observation or offline replay validation failed; "
+                "Positioned simulation observation validation failed; "
                 "see observation_report.json."
             )
     finally:

@@ -176,6 +176,48 @@ def collect_replayed_inference(wrapper, gripper_img_obs):
             )
 
 
+def collect_same_tensor_inference(wrapper, affordance_model_input):
+    """Repeat model inference without applying preprocessing again."""
+    aff_net = wrapper.gripper_cam_aff_net
+    if aff_net is None:
+        raise RuntimeError("The gripper affordance model is disabled.")
+
+    encoder = getattr(getattr(aff_net, "unet", None), "encoder", None)
+    original_prepare_input = getattr(encoder, "_prepare_input", None)
+    prepare_input_override = (
+        _instance_override(encoder, "_prepare_input")
+        if encoder is not None
+        else (None, False)
+    )
+    model_input = torch.from_numpy(np.asarray(affordance_model_input)).float()
+    first_parameter = next(aff_net.parameters(), None)
+    if first_parameter is not None:
+        model_input = model_input.to(first_parameter.device)
+    captured = {"affordance_model_input": _snapshot(model_input)}
+
+    if original_prepare_input is not None:
+        def record_dinov3_input(value):
+            prepared = original_prepare_input(value)
+            captured["dinov3_model_input"] = _snapshot(prepared)
+            return prepared
+
+        encoder._prepare_input = record_dinov3_input
+
+    try:
+        with torch.no_grad():
+            logits, probabilities, mask, directions = aff_net(model_input)
+        captured["affordance_logits"] = _snapshot(logits)
+        captured["affordance_probabilities"] = _snapshot(probabilities)
+        captured["dinov3_mask_128"] = _snapshot(mask)
+        captured["model_center_directions"] = _snapshot(directions)
+        return captured
+    finally:
+        if original_prepare_input is not None:
+            _restore_instance_override(
+                encoder, "_prepare_input", *prepare_input_override
+            )
+
+
 def _array_comparison(runtime_value, replayed_value, atol, rtol):
     runtime_array = _snapshot(runtime_value)
     replayed_array = _snapshot(replayed_value)
@@ -224,13 +266,86 @@ def _array_comparison(runtime_value, replayed_value, atol, rtol):
     return result
 
 
+def _missing_values(reference, candidate, names):
+    return {
+        name: {
+            "runtime": name not in reference,
+            "candidate": name not in candidate,
+        }
+        for name in names
+        if name not in reference or name not in candidate
+    }
+
+
+def _compare_values(reference, candidate, names, atol, rtol):
+    return {
+        name: _array_comparison(
+            reference[name], candidate[name], atol=atol, rtol=rtol
+        )
+        for name in names
+        if name in reference and name in candidate
+    }
+
+
+def _all_within_tolerance(comparisons, names):
+    return all(
+        name in comparisons and comparisons[name]["within_tolerance"]
+        for name in names
+    )
+
+
+def _all_exactly_equal(comparisons, names):
+    return all(
+        name in comparisons and comparisons[name]["exactly_equal"]
+        for name in names
+    )
+
+
+def _mask_metrics(runtime_mask, replayed_mask):
+    runtime_array = _snapshot(runtime_mask)
+    replayed_array = _snapshot(replayed_mask)
+    if runtime_array.shape != replayed_array.shape:
+        return {
+            "differing_pixel_count": None,
+            "differing_fraction": None,
+            "iou": None,
+            "dice": None,
+            "runtime_foreground_pixel_count": int(np.count_nonzero(runtime_array)),
+            "offline_replay_foreground_pixel_count": int(
+                np.count_nonzero(replayed_array)
+            ),
+        }
+
+    differing_pixel_count = int(np.count_nonzero(runtime_array != replayed_array))
+    runtime_foreground = runtime_array != 0
+    replayed_foreground = replayed_array != 0
+    intersection = int(np.count_nonzero(runtime_foreground & replayed_foreground))
+    union = int(np.count_nonzero(runtime_foreground | replayed_foreground))
+    foreground_total = int(runtime_foreground.sum() + replayed_foreground.sum())
+    return {
+        "differing_pixel_count": differing_pixel_count,
+        "differing_fraction": (
+            float(differing_pixel_count / runtime_array.size)
+            if runtime_array.size
+            else 0.0
+        ),
+        "iou": float(intersection / union) if union else 1.0,
+        "dice": float(2 * intersection / foreground_total)
+        if foreground_total
+        else 1.0,
+        "runtime_foreground_pixel_count": int(runtime_foreground.sum()),
+        "offline_replay_foreground_pixel_count": int(replayed_foreground.sum()),
+    }
+
+
 def build_offline_runtime_comparison(
     runtime_captured,
     replayed_captured,
+    same_tensor_captured,
     atol=1e-6,
     rtol=1e-5,
 ):
-    """Compare runtime tensors with an offline replay of the same raw frame."""
+    """Separate preprocessing, same-input inference, and semantic replay checks."""
     preprocessing_names = (
         "gripper_img_obs",
         "affordance_model_input",
@@ -242,44 +357,89 @@ def build_offline_runtime_comparison(
         "dinov3_mask_128",
         "model_center_directions",
     )
-    names = preprocessing_names + inference_names
+    same_tensor_inference_names = ("dinov3_model_input",) + inference_names
+    same_tensor_names = ("affordance_model_input",) + same_tensor_inference_names
     missing = {
-        name: {
-            "runtime": name not in runtime_captured,
-            "offline_replay": name not in replayed_captured,
-        }
-        for name in names
-        if name not in runtime_captured or name not in replayed_captured
+        group: values
+        for group, values in {
+            "preprocessing": _missing_values(
+                runtime_captured, replayed_captured, preprocessing_names
+            ),
+            "same_tensor_inference": _missing_values(
+                runtime_captured, same_tensor_captured, same_tensor_names
+            ),
+            "end_to_end_replay": _missing_values(
+                runtime_captured, replayed_captured, inference_names
+            ),
+        }.items()
+        if values
     }
-    comparisons = {
-        name: _array_comparison(
-            runtime_captured[name], replayed_captured[name], atol=atol, rtol=rtol
-        )
-        for name in names
-        if name not in missing
-    }
-
-    def matches(group):
-        return all(
-            name in comparisons and comparisons[name]["within_tolerance"]
-            for name in group
-        )
-
-    runtime_mask = runtime_captured.get("dinov3_mask_128", np.empty(0))
-    replayed_mask = replayed_captured.get("dinov3_mask_128", np.empty(0))
+    preprocessing = _compare_values(
+        runtime_captured, replayed_captured, preprocessing_names, atol, rtol
+    )
+    same_tensor = _compare_values(
+        runtime_captured, same_tensor_captured, same_tensor_names, atol, rtol
+    )
+    end_to_end = _compare_values(
+        runtime_captured, replayed_captured, inference_names, atol, rtol
+    )
+    mask_metrics = _mask_metrics(
+        runtime_captured.get("dinov3_mask_128", np.empty(0)),
+        replayed_captured.get("dinov3_mask_128", np.empty(0)),
+    )
+    preprocessing_matches = (
+        "preprocessing" not in missing
+        and _all_within_tolerance(preprocessing, preprocessing_names)
+    )
+    same_tensor_reproducible = (
+        "same_tensor_inference" not in missing
+        and _all_exactly_equal(same_tensor, same_tensor_names)
+    )
+    semantic_replay_equivalent = (
+        "end_to_end_replay" not in missing
+        and mask_metrics["differing_pixel_count"] == 0
+    )
     return {
         "frame_source": "gripper_img_obs captured from the selected runtime observation",
         "atol": float(atol),
         "rtol": float(rtol),
-        "values": comparisons,
+        "preprocessing": {
+            "values": preprocessing,
+            "equivalent": preprocessing_matches,
+        },
+        "same_tensor_inference": {
+            "input_source": "captured runtime affordance_model_input",
+            "reproducibility_definition": "bitwise equality for input and outputs",
+            "values": same_tensor,
+            "reproducible": same_tensor_reproducible,
+            "within_numerical_tolerance": _all_within_tolerance(
+                same_tensor, same_tensor_names
+            ),
+            "semantically_reproducible": (
+                "dinov3_mask_128" in same_tensor
+                and same_tensor["dinov3_mask_128"]["exactly_equal"]
+            ),
+        },
+        "end_to_end_replay": {
+            "values": end_to_end,
+            "mask_metrics": mask_metrics,
+            "mask_metric_definition": "foreground is any nonzero class label",
+            "numerically_equivalent": _all_within_tolerance(
+                end_to_end, inference_names
+            ),
+            "semantically_equivalent": semantic_replay_equivalent,
+        },
         "checks": {
             "missing_values": missing,
-            "preprocessing_matches": not missing and matches(preprocessing_names),
-            "inference_matches": not missing and matches(inference_names),
-            "runtime_foreground_pixel_count": int(np.count_nonzero(runtime_mask)),
-            "offline_replay_foreground_pixel_count": int(
-                np.count_nonzero(replayed_mask)
-            ),
+            "preprocessing_matches": preprocessing_matches,
+            "same_tensor_inference_reproducible": same_tensor_reproducible,
+            "semantic_replay_equivalent": semantic_replay_equivalent,
+            "runtime_foreground_pixel_count": mask_metrics[
+                "runtime_foreground_pixel_count"
+            ],
+            "offline_replay_foreground_pixel_count": mask_metrics[
+                "offline_replay_foreground_pixel_count"
+            ],
         },
     }
 

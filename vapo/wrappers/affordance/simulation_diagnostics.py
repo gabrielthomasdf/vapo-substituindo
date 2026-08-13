@@ -12,6 +12,19 @@ def _optional_list(value):
     return np.asarray(value).copy().tolist()
 
 
+def positioned_observation_validation_passed(report):
+    """Return whether the positioned runtime pipeline is functionally valid."""
+    checks = report["checks"]
+    comparison_checks = report["offline_runtime_comparison"]["checks"]
+    return bool(
+        checks["all_finite"]
+        and checks["shapes_match"]
+        and checks["center_found"]
+        and checks["world_conversion_succeeded"]
+        and comparison_checks["preprocessing_matches"]
+    )
+
+
 def collect_positioned_observation(
     wrapper,
     env,
