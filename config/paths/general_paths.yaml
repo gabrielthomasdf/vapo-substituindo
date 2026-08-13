@@ -1,5 +1,5 @@
 parent_folder: ../
-vapo_path: ${paths.parent_folder}/vapo/
+vapo_path: ${oc.env:VAPO_ROOT,${paths.parent_folder}/vapo/}
 vr_data: ${paths.vapo_path}/VREnv/data/
 
 # Trained affordance models

@@ -1,3 +1,5 @@
+import os
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -10,7 +12,7 @@ setup(
         CUDAExtension(
             name="hough_voting_cuda",
             sources=["hough_voting_layer.cpp", "hough_voting_kernel.cu"],
-            include_dirs=["/usr/local/include/eigen3"],
+            include_dirs=[os.environ.get("EIGEN3_INCLUDE_DIR", "/usr/local/include/eigen3")],
         )
     ],
     cmdclass={"build_ext": BuildExtension},
