@@ -22,6 +22,10 @@ def main(cfg):
     run_cfg.paths = cfg.paths
     run_cfg.test = cfg.test
     run_cfg.env.show_gui = cfg.env.show_gui
+
+    if cfg.test.eval_seed is not None:
+        run_cfg.env.seed = cfg.test.eval_seed
+
     run_cfg.scene = cfg.scene
     run_cfg.target_search = cfg.target_search
     run_cfg.camera_conf = cfg.camera_conf

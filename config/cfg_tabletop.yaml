@@ -36,6 +36,7 @@ test:
   model_name: most_tasks_from_15
   folder_name: ${paths.vapo_path}/trained_models/policy/tabletop/vapo
   preserve_current_affordance: false
+  eval_seed: null
   eval_cfg:
     n_episodes: 5
     print_all_episodes: True

@@ -12,3 +12,4 @@ gripper_cam_aff_path: ${oc.env:VAPO_GRIPPER_DINOV3_CKPT}
 
 test:
   preserve_current_affordance: true
+  eval_seed: null
