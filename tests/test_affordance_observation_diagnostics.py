@@ -54,7 +54,8 @@ class FakeWrapper:
         image = torch.zeros((1, 3, 128, 128))
         _, _, mask, directions = self.gripper_cam_aff_net(image)
         centers, _, _ = self.gripper_cam_aff_net.get_centers(mask, directions)
-        self.get_world_pt(None, centers[0].numpy(), np.ones((64, 64)), (64, 64))
+        if centers:
+            self.get_world_pt(None, centers[0].numpy(), np.ones((64, 64)), (64, 64))
         return {
             "gripper_aff": np.ones((1, 64, 64), dtype=np.int64),
             "gripper_img_obs": np.zeros((3, 200, 200), dtype=np.uint8),

@@ -1,7 +1,7 @@
 defaults:
   - cfg_tabletop
-  - override aff_model@affordance.gripper_cam.hyperparameters: gripper_cam_dinov3
   - transforms@affordance.gripper_cam.transforms: dinov3_rgb
+  - override aff_model@affordance.gripper_cam.hyperparameters: gripper_cam_dinov3
   - _self_
 
 # Opt-in tabletop configuration: only the gripper affordance encoder changes.
