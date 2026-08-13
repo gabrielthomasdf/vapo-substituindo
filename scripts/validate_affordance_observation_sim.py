@@ -7,6 +7,10 @@ from hydra.core.hydra_config import HydraConfig
 
 from vapo.affordance.affordance_model import AffordanceModel
 from vapo.wrappers.affordance.aff_wrapper_sim import AffordanceWrapperSim
+from vapo.wrappers.affordance.observation_diagnostics import (
+    build_offline_runtime_comparison,
+    collect_replayed_inference,
+)
 from vapo.wrappers.affordance.simulation_diagnostics import (
     collect_positioned_observation,
 )
@@ -49,28 +53,45 @@ def main(cfg):
             policy_img_size=int(cfg.env_wrapper.img_size),
             observation_attempts=int(cfg.observation_attempts),
         )
+        replayed = collect_replayed_inference(
+            wrapper, captured["gripper_img_obs"]
+        )
+        report["offline_runtime_comparison"] = build_offline_runtime_comparison(
+            captured, replayed
+        )
 
         output_dir = Path(HydraConfig.get().runtime.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         report_path = output_dir / "observation_report.json"
         arrays_path = output_dir / "observation_values.npz"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        np.savez_compressed(str(arrays_path), **_arrays_for_npz(captured))
+        arrays = _arrays_for_npz(captured)
+        arrays.update(
+            {
+                "offline_replay_%s" % name: value
+                for name, value in replayed.items()
+                if isinstance(value, np.ndarray)
+            }
+        )
+        np.savez_compressed(str(arrays_path), **arrays)
 
         print(json.dumps(report, indent=2))
         print("Full values: %s" % arrays_path)
         print("Summary: %s" % report_path)
 
         checks = report["checks"]
+        comparison_checks = report["offline_runtime_comparison"]["checks"]
         passed = (
             checks["all_finite"]
             and checks["shapes_match"]
             and checks["center_found"]
             and checks["world_conversion_succeeded"]
+            and comparison_checks["preprocessing_matches"]
+            and comparison_checks["inference_matches"]
         )
         if not passed:
             raise RuntimeError(
-                "Positioned simulation observation validation failed; "
+                "Positioned simulation observation or offline replay validation failed; "
                 "see observation_report.json."
             )
     finally:

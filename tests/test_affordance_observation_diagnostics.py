@@ -6,7 +6,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from vapo.wrappers.affordance.observation_diagnostics import (
+    build_offline_runtime_comparison,
     build_report,
+    collect_replayed_inference,
     collect_single_observation,
 )
 from vapo.wrappers.affordance.simulation_diagnostics import (
@@ -46,6 +48,11 @@ class FakeWrapper:
     def __init__(self):
         self.gripper_cam_aff_net = FakeAffordanceNet()
         self.curr_detected_obj = None
+        self.aff_transforms = {
+            "gripper": lambda image: torch.nn.functional.interpolate(
+                image.unsqueeze(0), size=(128, 128), mode="nearest"
+            ).squeeze(0)
+        }
 
     def get_world_pt(self, cam, pixel, depth, orig_shape):
         return np.array([0.1, 0.2, 0.3], dtype=np.float32)
@@ -99,6 +106,8 @@ def test_collects_single_observation_without_changing_pipeline_callables():
     captured = collect_single_observation(wrapper, {})
 
     assert captured["dinov3_model_input"].shape == (1, 3, 128, 128)
+    assert captured["affordance_logits"].shape == (1, 2, 128, 128)
+    assert captured["affordance_probabilities"].shape == (1, 2, 128, 128)
     assert captured["dinov3_mask_128"].shape == (1, 128, 128)
     assert captured["center_directions_128"].shape == (1, 2, 128, 128)
     assert captured["hough_centers_2d"].tolist() == [[64, 32]]
@@ -106,6 +115,38 @@ def test_collects_single_observation_without_changing_pipeline_callables():
     assert wrapper.gripper_cam_aff_net.get_centers == original_get_centers
     assert wrapper.get_world_pt == original_get_world_pt
     assert wrapper.gripper_cam_aff_net.unet.encoder._prepare_input == original_prepare_input
+
+
+def test_replays_preprocessing_and_inference_from_the_exact_runtime_frame():
+    wrapper = FakeWrapper()
+    captured = collect_single_observation(wrapper, {})
+    original_prepare_input = wrapper.gripper_cam_aff_net.unet.encoder._prepare_input
+
+    replayed = collect_replayed_inference(wrapper, captured["gripper_img_obs"])
+    comparison = build_offline_runtime_comparison(captured, replayed)
+
+    assert comparison["checks"] == {
+        "missing_values": {},
+        "preprocessing_matches": True,
+        "inference_matches": True,
+        "runtime_foreground_pixel_count": 128 * 128,
+        "offline_replay_foreground_pixel_count": 128 * 128,
+    }
+    assert wrapper.gripper_cam_aff_net.unet.encoder._prepare_input == original_prepare_input
+
+
+def test_offline_runtime_comparison_identifies_inference_divergence():
+    wrapper = FakeWrapper()
+    captured = collect_single_observation(wrapper, {})
+    replayed = collect_replayed_inference(wrapper, captured["gripper_img_obs"])
+    replayed["affordance_logits"][0, 0, 0, 0] += 1
+
+    comparison = build_offline_runtime_comparison(captured, replayed)
+
+    assert comparison["checks"]["preprocessing_matches"]
+    assert not comparison["checks"]["inference_matches"]
+    assert not comparison["values"]["affordance_logits"]["within_tolerance"]
+    assert comparison["values"]["affordance_logits"]["max_abs_diff"] == 1
 
 
 def test_report_checks_dinov3_shapes_and_non_finite_values():

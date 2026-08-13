@@ -58,6 +58,8 @@ def _record_wrapper_pipeline(wrapper, captured):
         captured["affordance_model_input"] = _snapshot(inputs[0])
 
     def record_model_output(module, inputs, output):
+        captured["affordance_logits"] = _snapshot(output[0])
+        captured["affordance_probabilities"] = _snapshot(output[1])
         captured["dinov3_mask_128"] = _snapshot(output[2])
         captured["model_center_directions"] = _snapshot(output[3])
 
@@ -128,6 +130,160 @@ def collect_single_observation(wrapper, raw_observation):
     return captured
 
 
+def collect_replayed_inference(wrapper, gripper_img_obs):
+    """Replay preprocessing and model inference from an exact captured CHW frame."""
+    aff_net = wrapper.gripper_cam_aff_net
+    if aff_net is None:
+        raise RuntimeError("The gripper affordance model is disabled.")
+
+    encoder = getattr(getattr(aff_net, "unet", None), "encoder", None)
+    original_prepare_input = getattr(encoder, "_prepare_input", None)
+    prepare_input_override = (
+        _instance_override(encoder, "_prepare_input")
+        if encoder is not None
+        else (None, False)
+    )
+    captured = {"gripper_img_obs": _snapshot(gripper_img_obs)}
+
+    if original_prepare_input is not None:
+        def record_dinov3_input(value):
+            prepared = original_prepare_input(value)
+            captured["dinov3_model_input"] = _snapshot(prepared)
+            return prepared
+
+        encoder._prepare_input = record_dinov3_input
+
+    try:
+        image = torch.from_numpy(np.asarray(gripper_img_obs)).float()
+        processed = wrapper.aff_transforms["gripper"](image)
+        model_input = processed.unsqueeze(0)
+        first_parameter = next(aff_net.parameters(), None)
+        if first_parameter is not None:
+            model_input = model_input.to(first_parameter.device)
+        captured["affordance_model_input"] = _snapshot(model_input)
+
+        with torch.no_grad():
+            logits, probabilities, mask, directions = aff_net(model_input)
+        captured["affordance_logits"] = _snapshot(logits)
+        captured["affordance_probabilities"] = _snapshot(probabilities)
+        captured["dinov3_mask_128"] = _snapshot(mask)
+        captured["model_center_directions"] = _snapshot(directions)
+        return captured
+    finally:
+        if original_prepare_input is not None:
+            _restore_instance_override(
+                encoder, "_prepare_input", *prepare_input_override
+            )
+
+
+def _array_comparison(runtime_value, replayed_value, atol, rtol):
+    runtime_array = _snapshot(runtime_value)
+    replayed_array = _snapshot(replayed_value)
+    same_shape = runtime_array.shape == replayed_array.shape
+    supports_nan = np.issubdtype(runtime_array.dtype, np.inexact) and np.issubdtype(
+        replayed_array.dtype, np.inexact
+    )
+    exactly_equal = same_shape and (
+        np.array_equal(runtime_array, replayed_array, equal_nan=True)
+        if supports_nan
+        else np.array_equal(runtime_array, replayed_array)
+    )
+    result = {
+        "runtime": array_summary(runtime_array),
+        "offline_replay": array_summary(replayed_array),
+        "same_shape": same_shape,
+        "exactly_equal": bool(exactly_equal),
+        "within_tolerance": False,
+        "max_abs_diff": None,
+        "mean_abs_diff": None,
+    }
+    if not same_shape:
+        return result
+
+    if np.issubdtype(runtime_array.dtype, np.number) and np.issubdtype(
+        replayed_array.dtype, np.number
+    ):
+        result["within_tolerance"] = bool(
+            np.allclose(
+                runtime_array,
+                replayed_array,
+                atol=atol,
+                rtol=rtol,
+                equal_nan=True,
+            )
+        )
+        difference = np.abs(
+            runtime_array.astype(np.float64) - replayed_array.astype(np.float64)
+        )
+        finite_difference = difference[np.isfinite(difference)]
+        if finite_difference.size:
+            result["max_abs_diff"] = float(finite_difference.max())
+            result["mean_abs_diff"] = float(finite_difference.mean())
+    else:
+        result["within_tolerance"] = result["exactly_equal"]
+    return result
+
+
+def build_offline_runtime_comparison(
+    runtime_captured,
+    replayed_captured,
+    atol=1e-6,
+    rtol=1e-5,
+):
+    """Compare runtime tensors with an offline replay of the same raw frame."""
+    preprocessing_names = (
+        "gripper_img_obs",
+        "affordance_model_input",
+        "dinov3_model_input",
+    )
+    inference_names = (
+        "affordance_logits",
+        "affordance_probabilities",
+        "dinov3_mask_128",
+        "model_center_directions",
+    )
+    names = preprocessing_names + inference_names
+    missing = {
+        name: {
+            "runtime": name not in runtime_captured,
+            "offline_replay": name not in replayed_captured,
+        }
+        for name in names
+        if name not in runtime_captured or name not in replayed_captured
+    }
+    comparisons = {
+        name: _array_comparison(
+            runtime_captured[name], replayed_captured[name], atol=atol, rtol=rtol
+        )
+        for name in names
+        if name not in missing
+    }
+
+    def matches(group):
+        return all(
+            name in comparisons and comparisons[name]["within_tolerance"]
+            for name in group
+        )
+
+    runtime_mask = runtime_captured.get("dinov3_mask_128", np.empty(0))
+    replayed_mask = replayed_captured.get("dinov3_mask_128", np.empty(0))
+    return {
+        "frame_source": "gripper_img_obs captured from the selected runtime observation",
+        "atol": float(atol),
+        "rtol": float(rtol),
+        "values": comparisons,
+        "checks": {
+            "missing_values": missing,
+            "preprocessing_matches": not missing and matches(preprocessing_names),
+            "inference_matches": not missing and matches(inference_names),
+            "runtime_foreground_pixel_count": int(np.count_nonzero(runtime_mask)),
+            "offline_replay_foreground_pixel_count": int(
+                np.count_nonzero(replayed_mask)
+            ),
+        },
+    }
+
+
 def array_summary(value):
     array = _snapshot(value)
     summary = {
@@ -162,6 +318,8 @@ def build_report(captured, encoder_type, policy_img_size):
     tensor_names = (
         "affordance_model_input",
         "dinov3_model_input",
+        "affordance_logits",
+        "affordance_probabilities",
         "dinov3_mask_128",
         "hough_mask",
         "model_center_directions",
