@@ -91,9 +91,16 @@ def change_project_path(cfg, run_cfg):
     run_cfg.data_path = run_cfg.data_path.replace(run_cfg.project_path, cfg.project_path)
 
 
-def load_cfg(cfg_path, cfg, optim_res=False):
+def load_cfg(cfg_path, cfg, optim_res=False, current_sections=()):
     if os.path.exists(cfg_path) and not optim_res:
         run_cfg = OmegaConf.load(cfg_path)
+        for section in current_sections:
+            if section not in cfg:
+                raise KeyError("Current configuration has no '%s' section." % section)
+            # Resolve before re-parenting so interpolations cannot silently bind
+            # to values from the historical SAC configuration.
+            resolved_section = OmegaConf.to_container(cfg[section], resolve=True)
+            run_cfg[section] = OmegaConf.create(resolved_section)
         net_cfg = run_cfg.agent.net_cfg
         env_wrapper = run_cfg.env_wrapper
         agent_cfg = run_cfg.agent.hyperparameters

@@ -44,9 +44,13 @@ class AffordanceWrapperBase(gym.Wrapper):
         self.img_size = img_size
 
         # Prepreocessing for affordance model
-        _transforms_cfg = affordance_cfg.transforms["validation"]
+        _static_transforms_cfg = affordance_cfg.transforms["validation"]
+        _gripper_transforms = self._cfg_value(
+            affordance_cfg.gripper_cam, "transforms", affordance_cfg.transforms
+        )
+        _gripper_transforms_cfg = _gripper_transforms["validation"]
         _static_aff_im_size = 200
-        if img_size in affordance_cfg.static_cam:
+        if "img_size" in affordance_cfg.static_cam:
             _static_aff_im_size = affordance_cfg.static_cam.img_size
 
         self.gripper_aff_img_size = self._get_gripper_aff_img_size(
@@ -54,16 +58,26 @@ class AffordanceWrapperBase(gym.Wrapper):
         )
         if self.gripper_aff_img_size == self.img_size:
             # Preserve the official ResNet18 preprocessing path exactly.
-            _gripper_aff_transforms, _aff_shape = get_transforms_and_shape(
-                _transforms_cfg, self.img_size
+            _gripper_aff_transforms, _gripper_aff_shape = get_transforms_and_shape(
+                _gripper_transforms_cfg, self.img_size
             )
         else:
-            _gripper_aff_transforms, _aff_shape = get_transforms_and_shape(
-                _transforms_cfg, self.img_size, out_size=self.gripper_aff_img_size
+            _gripper_aff_transforms, _gripper_aff_shape = get_transforms_and_shape(
+                _gripper_transforms_cfg, self.img_size, out_size=self.gripper_aff_img_size
             )
 
+        _static_aff_transforms, _static_aff_shape = get_transforms_and_shape(
+            _static_transforms_cfg, self.img_size, out_size=_static_aff_im_size
+        )
+        self._validate_affordance_preprocessing(
+            "gripper", affordance_cfg.gripper_cam, _gripper_aff_shape
+        )
+        self._validate_affordance_preprocessing(
+            "static", affordance_cfg.static_cam, _static_aff_shape
+        )
+
         self.aff_transforms = {
-            "static": get_transforms_and_shape(_transforms_cfg, self.img_size, out_size=_static_aff_im_size)[0],
+            "static": _static_aff_transforms,
             "gripper": _gripper_aff_transforms,
         }
 
@@ -87,9 +101,12 @@ class AffordanceWrapperBase(gym.Wrapper):
         # self._mask_transforms = DistanceTransform()
 
         # Parameters to store affordance
-        _in_channels = _aff_shape[0]
-        self.gripper_cam_aff_net = init_aff_net(affordance_cfg, "gripper", _in_channels)
-        self.static_cam_aff_net = init_aff_net(affordance_cfg, "static", _in_channels)
+        self.gripper_cam_aff_net = init_aff_net(
+            affordance_cfg, "gripper", _gripper_aff_shape[0]
+        )
+        self.static_cam_aff_net = init_aff_net(
+            affordance_cfg, "static", _static_aff_shape[0]
+        )
         self.observation_space = get_obs_space(
             affordance_cfg,
             self.gripper_cam_cfg,
@@ -123,6 +140,27 @@ class AffordanceWrapperBase(gym.Wrapper):
         # checkpoint/config compatibility, without introducing a second rule.
         uses_dinov3 = AffordanceModel._resolve_encoder_type(model_cfg) == "dinov3"
         return cls.DINOV3_GRIPPER_AFF_SIZE if uses_dinov3 else policy_img_size
+
+    @classmethod
+    def _validate_affordance_preprocessing(cls, cam_type, camera_aff_cfg, output_shape):
+        hyperparameters = cls._cfg_value(camera_aff_cfg, "hyperparameters")
+        model_cfg = cls._cfg_value(hyperparameters, "cfg")
+        encoder_type = AffordanceModel._resolve_encoder_type(model_cfg)
+        channels = int(output_shape[0])
+        expected_channels = 3 if encoder_type == "dinov3" else 1
+        if channels == expected_channels:
+            return
+
+        if encoder_type == "dinov3":
+            raise ValueError(
+                "DINOv3 %s preprocessing must produce 3 RGB channels, got %d. "
+                "Select transforms@affordance.%s_cam.transforms=dinov3_rgb."
+                % (cam_type, channels, cam_type)
+            )
+        raise ValueError(
+            "ResNet18 %s preprocessing must produce 1 grayscale channel, got %d."
+            % (cam_type, channels)
+        )
 
     @staticmethod
     def _resize_gripper_aff_for_policy(mask, output_size):
@@ -241,9 +279,9 @@ class AffordanceWrapperBase(gym.Wrapper):
 
         if aff_net is not None and (aff_cfg.use or get_gripper_target):
             with torch.no_grad():
-                # Np array 1, H, W
+                # Affordance preprocessing yields C, H, W.
                 processed_obs = self.aff_transforms[cam_type](tt(img_obs))
-                # 1, 1, H, W in range [-1, 1]
+                # Add the batch dimension: 1, C, H, W.
                 obs_t = processed_obs.unsqueeze(0)
                 obs_t = obs_t.float().cuda()
 

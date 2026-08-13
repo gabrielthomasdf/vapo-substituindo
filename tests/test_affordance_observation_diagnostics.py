@@ -9,6 +9,9 @@ from vapo.wrappers.affordance.observation_diagnostics import (
     build_report,
     collect_single_observation,
 )
+from vapo.wrappers.affordance.simulation_diagnostics import (
+    collect_positioned_observation,
+)
 
 
 class FakeEncoder(torch.nn.Module):
@@ -42,6 +45,7 @@ class FakeAffordanceNet(torch.nn.Module):
 class FakeWrapper:
     def __init__(self):
         self.gripper_cam_aff_net = FakeAffordanceNet()
+        self.curr_detected_obj = None
 
     def get_world_pt(self, cam, pixel, depth, orig_shape):
         return np.array([0.1, 0.2, 0.3], dtype=np.float32)
@@ -63,6 +67,26 @@ class FakeWrapper:
             observation["gripper_img_obs"].unsqueeze(0), size=(64, 64)
         ).squeeze(0)
         return observation
+
+
+class FakeSimulationEnv:
+    def __init__(self):
+        self.events = []
+        self.robot_position = np.array([0.1, 0.2, 0.39], dtype=np.float32)
+
+    def reset(self, eval=False):
+        self.events.append(("reset", eval))
+
+    def get_target_pos(self):
+        self.events.append(("get_target_pos",))
+        return np.array([0.1, 0.2, 0.3], dtype=np.float32), False
+
+    def move_to_target(self, target_pos):
+        self.events.append(("move_to_target", np.asarray(target_pos).copy()))
+
+    def get_obs(self):
+        self.events.append(("get_obs",))
+        return {"robot_obs": np.array([*self.robot_position, 0, 0, 0, 1])}
 
 
 def test_collects_single_observation_without_changing_pipeline_callables():
@@ -115,3 +139,89 @@ def test_report_identifies_nan_and_infinity():
     assert not report["checks"]["all_finite"]
     assert report["checks"]["non_finite_values"]["target_distance"] == 1
     assert report["checks"]["non_finite_values"]["world_points_3d"] == 1
+
+
+def test_positioned_simulation_observation_moves_before_collecting_report():
+    env = FakeSimulationEnv()
+    wrapper = FakeWrapper()
+
+    captured, report = collect_positioned_observation(
+        wrapper,
+        env,
+        encoder_type="dinov3",
+        policy_img_size=64,
+    )
+
+    assert [event[0] for event in env.events] == [
+        "reset",
+        "get_target_pos",
+        "move_to_target",
+        "get_obs",
+    ]
+    np.testing.assert_allclose(env.events[2][1], [0.1, 0.2, 0.3])
+    assert captured["dinov3_model_input"].shape == (1, 3, 128, 128)
+    assert report["positioning"] == {
+        "target_pos": pytest.approx([0.1, 0.2, 0.3]),
+        "robot_position_after_move_to_target": pytest.approx([0.1, 0.2, 0.39]),
+        "robot_target_distance_after_move_to_target": pytest.approx(0.09),
+        "curr_detected_obj_before": None,
+        "curr_detected_obj_after_seed": pytest.approx([0.1, 0.2, 0.3]),
+        "curr_detected_obj_after_observation": pytest.approx([0.1, 0.2, 0.3]),
+    }
+    assert report["checks"]["center_found"]
+    assert report["checks"]["world_conversion_succeeded"]
+
+
+def test_positioned_simulation_observation_reports_missing_center_without_crash():
+    env = FakeSimulationEnv()
+    wrapper = FakeWrapper()
+
+    def no_centers(mask, directions):
+        wrapper.gripper_cam_aff_net.hough_voting_layer(mask.int(), directions)
+        return [], directions, mask
+
+    wrapper.gripper_cam_aff_net.get_centers = no_centers
+
+    _, report = collect_positioned_observation(
+        wrapper,
+        env,
+        encoder_type="dinov3",
+        policy_img_size=64,
+    )
+
+    assert report["checks"]["all_finite"]
+    assert report["checks"]["shapes_match"]
+    assert report["checks"]["hough_center_count"] == 0
+    assert report["checks"]["valid_world_point_count"] == 0
+    assert not report["checks"]["center_found"]
+    assert not report["checks"]["world_conversion_succeeded"]
+
+
+def test_positioned_simulation_observation_can_retry_without_hiding_failed_frames():
+    env = FakeSimulationEnv()
+    wrapper = FakeWrapper()
+    original_get_centers = wrapper.gripper_cam_aff_net.get_centers
+    calls = 0
+
+    def centers_after_first_frame(mask, directions):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            wrapper.gripper_cam_aff_net.hough_voting_layer(mask.int(), directions)
+            return [], directions, mask
+        return original_get_centers(mask, directions)
+
+    wrapper.gripper_cam_aff_net.get_centers = centers_after_first_frame
+
+    _, report = collect_positioned_observation(
+        wrapper,
+        env,
+        encoder_type="dinov3",
+        policy_img_size=64,
+        observation_attempts=3,
+    )
+
+    assert report["observation_attempts"]["performed"] == 2
+    assert report["observation_attempts"]["selected"] == 2
+    assert not report["observation_attempts"]["results"][0]["checks"]["center_found"]
+    assert report["observation_attempts"]["results"][1]["checks"]["center_found"]

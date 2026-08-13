@@ -13,7 +13,11 @@ def main(cfg):
     original_dir = hydra.utils.get_original_cwd()
     run_dir = os.path.join(original_dir, cfg.test.folder_name)
     run_dir = os.path.abspath(run_dir)
-    run_cfg, net_cfg, env_wrapper, agent_cfg = load_cfg(os.path.join(run_dir, ".hydra/config.yaml"), cfg)
+    run_cfg, net_cfg, env_wrapper, agent_cfg = load_cfg(
+        os.path.join(run_dir, ".hydra/config.yaml"),
+        cfg,
+        current_sections=("affordance",),
+    )
 
     run_cfg.paths = cfg.paths
     run_cfg.test = cfg.test

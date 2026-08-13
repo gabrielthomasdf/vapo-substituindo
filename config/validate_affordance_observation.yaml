@@ -1,10 +1,11 @@
 defaults:
   - cfg_real_world
   - override aff_model@affordance.gripper_cam.hyperparameters: gripper_cam_dinov3
-  - override transforms@affordance.transforms: dinov3_rgb
+  - transforms@affordance.gripper_cam.transforms: dinov3_rgb
   - _self_
 
 # This config is opt-in and does not replace the ResNet18 real-world config.
+img_resize: 128
 affordance:
   static_cam:
     use: false

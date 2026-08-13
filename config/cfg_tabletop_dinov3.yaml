@@ -1,0 +1,11 @@
+defaults:
+  - cfg_tabletop
+  - override aff_model@affordance.gripper_cam.hyperparameters: gripper_cam_dinov3
+  - transforms@affordance.gripper_cam.transforms: dinov3_rgb
+  - _self_
+
+# Opt-in tabletop configuration: only the gripper affordance encoder changes.
+# The SAC, static affordance model and policy observation size come from
+# cfg_tabletop unchanged.
+img_resize: 128
+gripper_cam_aff_path: ${oc.env:VAPO_GRIPPER_DINOV3_CKPT}

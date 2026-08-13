@@ -1,0 +1,25 @@
+defaults:
+  - cfg_tabletop_dinov3
+  - _self_
+
+# Acquire more than one post-positioning frame only when requested explicitly.
+observation_attempts: 1
+
+save_images: false
+viz_obs: false
+
+affordance:
+  static_cam:
+    use: false
+  gripper_cam:
+    use: true
+    use_distance: true
+    densify_reward: true
+    target_in_obs: false
+
+env_wrapper:
+  use_aff_termination: false
+
+hydra:
+  run:
+    dir: ./hydra_outputs/affordance_observation_validation_sim/${now:%Y-%m-%d}/${now:%H-%M-%S}
